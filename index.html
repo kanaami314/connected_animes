@@ -1,0 +1,973 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>縁図 — アニメのつながりを描く</title>
+<meta name="description" content="1本のアニメを起点に、タグ・スタッフ・制作会社の重なりから近い作品の地図を描きます。">
+<style>
+:root{
+  --paper:#edf0ee;
+  --paper-2:#f6f8f6;
+  --sumi:#1b1f1e;
+  --sumi-soft:#6b7370;
+  --rule:#d3d9d6;
+  --shu:#c8452f;
+  --old:#8fbdb6;
+  --new:#123a4d;
+  --mincho:"Hiragino Mincho ProN","Yu Mincho","YuMincho","Noto Serif JP",serif;
+  --gothic:"Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic","YuGothic","Noto Sans JP",system-ui,sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;margin:0}
+body{
+  background:var(--paper);color:var(--sumi);font-family:var(--gothic);
+  font-size:15px;line-height:1.6;overflow:hidden;
+  -webkit-font-smoothing:antialiased;
+}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+:focus-visible{outline:2px solid var(--shu);outline-offset:2px}
+
+/* ---------- 全体レイアウト ---------- */
+#app{position:fixed;inset:0;display:flex;flex-direction:column}
+
+/* ---------- ヘッダ ---------- */
+header{
+  flex:0 0 auto;display:flex;align-items:center;gap:14px;
+  padding:calc(10px + env(safe-area-inset-top)) 16px 10px;
+  border-bottom:1px solid var(--rule);background:var(--paper-2);
+  position:relative;z-index:40;
+}
+.brand{display:flex;align-items:baseline;gap:8px;flex:0 0 auto;cursor:pointer}
+.brand .mark{
+  font-family:var(--mincho);font-size:23px;letter-spacing:.04em;
+  color:var(--shu);line-height:1;
+}
+.brand .sub{font-size:11px;color:var(--sumi-soft);letter-spacing:.14em}
+@media(max-width:600px){.brand .sub{display:none}}
+
+.searchwrap{position:relative;flex:1 1 auto;max-width:520px}
+#q{
+  width:100%;padding:9px 14px 9px 34px;border:1px solid var(--rule);
+  border-radius:999px;background:#fff;font-size:15px;font-family:var(--gothic);
+  color:var(--sumi);
+}
+#q::placeholder{color:#9aa3a0}
+.searchwrap svg.mag{position:absolute;left:12px;top:50%;transform:translateY(-50%);pointer-events:none;opacity:.45}
+#suggest{
+  position:absolute;top:calc(100% + 6px);left:0;right:0;background:#fff;
+  border:1px solid var(--rule);border-radius:10px;overflow:hidden;
+  box-shadow:0 12px 32px -12px rgba(20,30,28,.3);max-height:52vh;overflow-y:auto;
+}
+#suggest[hidden]{display:none}
+#suggest button{
+  display:block;width:100%;text-align:left;padding:10px 14px;
+  border-bottom:1px solid #eef1ef;
+}
+#suggest button:last-child{border-bottom:none}
+#suggest button:hover,#suggest button[data-on="1"]{background:#f0f4f2}
+.sg-t{font-family:var(--mincho);font-size:15px;line-height:1.35}
+.sg-m{font-family:var(--mono);font-size:11px;color:var(--sumi-soft);margin-top:2px}
+
+/* ---------- 本体 ---------- */
+main{flex:1 1 auto;position:relative;min-height:0;display:block}
+#stage{position:absolute;inset:0;touch-action:none;overflow:hidden}
+#svg{display:block;width:100%;height:100%;cursor:grab}
+#svg.dragging{cursor:grabbing}
+
+
+#nodes g{cursor:pointer}
+#nodes circle.body{mix-blend-mode:multiply}
+#labels text{
+  font-family:var(--gothic);font-weight:600;
+  paint-order:stroke;stroke-width:3.5px;stroke-linejoin:round;
+  pointer-events:none;user-select:none;
+}
+#links line{stroke:#7b8a86;fill:none}
+#rings circle{fill:none;stroke:#c0cac6;stroke-width:1;stroke-dasharray:2 7}
+#rings text{font-family:var(--mono);font-size:10px;fill:#9aa5a1;text-anchor:middle}
+
+/* 起点の落款 */
+#nodes g.seed circle.seal{fill:none;stroke:var(--shu);stroke-width:2.5}
+
+#nodes circle.halo{fill:none;stroke:none}
+#nodes g.sel circle.halo{stroke:var(--sumi);stroke-width:1.5;stroke-dasharray:3 4}
+
+/* ---------- 凡例 ---------- */
+.legend{
+  position:absolute;left:16px;bottom:16px;z-index:20;
+  display:flex;align-items:center;gap:12px;pointer-events:none;
+}
+.legend .ramp{width:150px;height:8px;border-radius:2px;
+  background:linear-gradient(90deg,var(--old),var(--new));}
+.legend .yr{font-family:var(--mono);font-size:11px;color:var(--sumi-soft)}
+.legend .cap{font-size:11px;color:var(--sumi-soft);letter-spacing:.1em}
+@media(max-width:600px){.legend .ramp{width:96px}}
+
+.tools{position:absolute;right:16px;bottom:16px;z-index:20;display:flex;flex-direction:column;gap:8px}
+.tools button{
+  width:40px;height:40px;border-radius:50%;background:#fff;border:1px solid var(--rule);
+  display:grid;place-items:center;box-shadow:0 4px 14px -6px rgba(20,30,28,.35);
+}
+.tools button:active{transform:scale(.94)}
+
+/* ---------- 状態表示 ---------- */
+#state{
+  position:absolute;inset:0;display:grid;place-items:center;padding:28px;
+  text-align:center;z-index:15;
+}
+#state[hidden]{display:none}
+#state .inner{max-width:440px}
+#state h1{
+  font-family:var(--mincho);font-weight:400;font-size:clamp(26px,6vw,38px);
+  margin:0 0 14px;letter-spacing:.06em;line-height:1.45;
+}
+#state p{color:var(--sumi-soft);margin:0 0 22px;font-size:14px}
+#state .seeds{display:flex;flex-wrap:wrap;gap:8px;justify-content:center}
+#state .seeds button{
+  padding:7px 14px;border:1px solid var(--rule);border-radius:999px;background:#fff;
+  font-family:var(--mincho);font-size:14px;
+}
+#state .seeds button:hover{border-color:var(--shu);color:var(--shu)}
+.err{color:var(--shu);font-family:var(--mono);font-size:12px;margin-top:16px;line-height:1.7}
+
+/* 読み込み */
+#load{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:16;text-align:center}
+#load[hidden]{display:none}
+#load .ink{width:52px;height:52px;margin:0 auto 14px;border-radius:50%;
+  background:radial-gradient(circle at 50% 50%,var(--new),transparent 70%);
+  animation:pulse 1.5s ease-in-out infinite}
+@keyframes pulse{0%,100%{transform:scale(.7);opacity:.35}50%{transform:scale(1);opacity:.9}}
+#load .msg{font-family:var(--mono);font-size:12px;color:var(--sumi-soft)}
+
+/* ---------- 詳細パネル（常に下側） ---------- */
+#panel{
+  position:absolute;left:0;right:0;bottom:0;z-index:30;
+  max-height:52%;overflow-y:auto;-webkit-overflow-scrolling:touch;
+  background:var(--paper-2);border-top:1px solid var(--rule);border-radius:14px 14px 0 0;
+  box-shadow:0 -10px 40px -18px rgba(20,30,28,.5);
+  padding:18px 20px calc(20px + env(safe-area-inset-bottom));
+  animation:rise .2s ease-out;
+}
+#panel[hidden]{display:none}
+@keyframes rise{from{transform:translateY(14px);opacity:0}to{transform:none;opacity:1}}
+#p-close{
+  position:absolute;right:12px;top:12px;width:30px;height:30px;border-radius:50%;
+  background:#e6ebe8;display:grid;place-items:center;z-index:2;
+}
+#p-body{display:grid;gap:0 34px;grid-template-columns:1fr}
+@media(min-width:860px){
+  #panel{padding:20px 28px calc(20px + env(safe-area-inset-bottom))}
+  #p-body{grid-template-columns:minmax(260px,1.1fr) 1fr 1fr;align-items:start}
+  .col+.col{border-left:1px solid var(--rule);padding-left:34px}
+  .col .p-h:first-child{margin-top:0}
+}
+.p-kicker{display:flex;align-items:center;gap:7px;margin-bottom:9px}
+.p-seal{
+  font-family:var(--mincho);font-size:10px;color:#fff;background:var(--shu);
+  padding:2px 5px;border-radius:2px;letter-spacing:.08em;
+}
+.p-rel{font-family:var(--mono);font-size:11px;color:var(--sumi-soft);letter-spacing:.06em}
+#panel h2{
+  font-family:var(--mincho);font-weight:400;font-size:23px;line-height:1.45;
+  margin:0 0 4px;letter-spacing:.02em;padding-right:34px;
+}
+.p-romaji{font-family:var(--mono);font-size:11px;color:var(--sumi-soft);margin-bottom:14px;word-break:break-word}
+.p-meta{
+  display:grid;grid-template-columns:auto 1fr;gap:5px 14px;
+  font-size:13px;padding:13px 0;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);
+  margin:0;
+}
+.p-meta dt{color:var(--sumi-soft);font-size:12px}
+.p-meta dd{margin:0;font-family:var(--mono);font-size:12.5px}
+.p-meta dd.jp{font-family:var(--gothic);font-size:13px}
+.p-sim{margin:14px 0}
+.p-sim .row{display:flex;justify-content:space-between;font-size:12px;color:var(--sumi-soft);margin-bottom:5px}
+.p-sim .row b{font-family:var(--mono);color:var(--sumi);font-weight:600}
+.p-bar{height:5px;background:#dfe4e1;border-radius:3px;overflow:hidden}
+.p-bar i{display:block;height:100%;background:var(--new)}
+.p-h{font-size:11px;color:var(--sumi-soft);letter-spacing:.14em;margin:18px 0 9px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chips span{
+  font-size:12px;padding:3px 9px;border:1px solid var(--rule);border-radius:3px;
+  background:#fff;color:#39423f;
+}
+.chips span i{font-style:normal;font-family:var(--mono);font-size:10px;color:var(--sumi-soft);margin-left:5px}
+.linklist button{
+  display:flex;justify-content:space-between;align-items:baseline;gap:10px;width:100%;
+  text-align:left;padding:8px 0;border-bottom:1px solid var(--rule);
+}
+.linklist button:hover .lt{color:var(--shu)}
+.lt{font-family:var(--mincho);font-size:14px;line-height:1.4}
+.ly{font-family:var(--mono);font-size:11px;color:var(--sumi-soft);flex:0 0 auto}
+.p-actions{display:flex;gap:8px;margin-top:18px;flex-wrap:wrap}
+.p-actions button,.p-actions a{
+  flex:1 1 auto;text-align:center;padding:9px 12px;border:1px solid var(--sumi);
+  border-radius:4px;font-size:13px;text-decoration:none;color:var(--sumi);background:#fff;
+}
+.p-actions .primary{background:var(--sumi);color:var(--paper-2);border-color:var(--sumi)}
+
+/* 凡例と操作ボタンは上側へ（下はパネルの領域） */
+.legend{top:14px;bottom:auto}
+.tools{top:14px;bottom:auto;flex-direction:row}
+
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="brand" id="home" role="button" tabindex="0">
+      <span class="mark">縁図</span><span class="sub">ENISHI-ZU</span>
+    </div>
+    <div class="searchwrap">
+      <svg class="mag" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+      <input id="q" type="search" autocomplete="off" placeholder="作品名を入力（例: 化物語）" aria-label="作品を検索">
+      <div id="suggest" hidden role="listbox"></div>
+    </div>
+  </header>
+
+  <main>
+    <div id="stage">
+      <svg id="svg" role="img" aria-label="作品の関連図">
+        <g id="view">
+          <g id="rings"></g>
+        <g id="links"></g>
+          <g id="nodes"></g>
+        <g id="labels"></g>
+        </g>
+      </svg>
+
+      <div class="legend" hidden id="legend">
+        <span class="cap" id="cap-mode">中心からの距離＝類似度　／　放送年</span>
+        <span class="yr" id="yr-min"></span>
+        <span class="ramp"></span>
+        <span class="yr" id="yr-max"></span>
+      </div>
+
+      <div class="tools" hidden id="tools">
+        <button id="mode" title="配置を切り替え" aria-label="配置を切り替え">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9.5" stroke-dasharray="2 3"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/></svg>
+        </button>
+        <button id="fit" title="全体を表示" aria-label="全体を表示">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+        </button>
+        <button id="help" title="見方" aria-label="見方">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9.2 9a2.8 2.8 0 115.3 1.3c-.6 1-2.5 1.4-2.5 3"/><circle cx="12" cy="17.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="9.5"/></svg>
+        </button>
+      </div>
+
+      <div id="load" hidden><div class="ink"></div><div class="msg" id="load-msg"></div></div>
+
+      <div id="state">
+        <div class="inner">
+          <h1>一本の作品から、<br>近い作品の地図を描く。</h1>
+          <p>タグ・スタッフ・制作会社の重なりを類似度に変換して配置します。<br>円の大きさは登録者数、色の濃さは放送年。</p>
+          <div class="seeds" id="seeds"></div>
+          <div class="err" id="err"></div>
+        </div>
+      </div>
+    </div>
+
+    <aside id="panel" hidden aria-live="polite">
+      <button id="p-close" aria-label="閉じる">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 5l14 14M19 5L5 19"/></svg>
+      </button>
+      <div id="p-body"></div>
+    </aside>
+  </main>
+</div>
+
+<script>
+"use strict";
+
+/* ============================================================
+   縁図 / Enishi-zu
+   1作品を起点に、AniList のタグ・スタッフ・制作会社メタデータから
+   類似作品グラフを構築して力学配置で描画する。
+   共起（視聴履歴）は使わない = 海外ユーザーの嗜好バイアスが入らない。
+   ============================================================ */
+
+const API = "https://graphql.anilist.co";
+const NODE_LIMIT   = 38;   // 起点を除く表示ノード数
+const EDGE_PER_NODE = 4;   // 1ノードあたり残す最大エッジ数
+const EDGE_MIN     = 0.22; // エッジを引く最小類似度（引き伸ばし後の尺度）
+const TAG_MIN_RANK = 40;   // これ未満のランクのタグは無視
+const GENRE_W      = 0.5;  // ジャンルの重み（タグは rank/100 = 0.4〜1.0）
+const COS_LO       = 0.12; // 余弦の実効下限。これを 0% に写す
+const COS_HI       = 0.67; // 余弦の実効上限。これを 100% に写す
+const STUDIO_W     = [0.02, 0.10]; // 制作会社の加点幅（作風の一貫性で可変）
+const STAFF_CAP    = 0.34; // スタッフ加点の上限
+// 同心円配置: 中心からの距離が「起点との類似度」を表す
+const RADIAL = {R0: 150, K: 470, force: 0.135};
+let mode = "radial";       // "radial"（同心円） / "cluster"（本家寄りの力学のみ）
+
+// 役職ごとの重み。"Animation Director" 等を拾わないよう完全一致で判定する
+const ROLE_W = [
+  [/^(Chief\s+)?Director$/i,          0.20, "監督"],
+  [/^Original (Creator|Story)$/i,     0.16, "原作"],
+  [/^Series Composition$/i,           0.10, "シリーズ構成"],
+  [/^(Original\s+)?Character Design$/i, 0.10, "キャラクターデザイン"],
+  [/^(Script|Screenplay)$/i,          0.06, "脚本"],
+  [/^Music$/i,                        0.04, "音楽"],
+];
+function roleInfo(role){
+  const r = String(role || "").replace(/\(.*?\)/g, "").trim();
+  for (const [re, w, ja] of ROLE_W) if (re.test(r)) return {w, ja};
+  return null;
+}
+
+/* ---------- AniList クライアント（90 req/min を自主的に守る） ---------- */
+let lastCall = 0;
+async function gql(query, variables){
+  const wait = 130 - (Date.now() - lastCall);
+  if (wait > 0) await new Promise(r => setTimeout(r, wait));
+  lastCall = Date.now();
+  const res = await fetch(API, {
+    method:"POST",
+    headers:{"Content-Type":"application/json", "Accept":"application/json"},
+    body: JSON.stringify({query, variables})
+  });
+  if (res.status === 429){
+    const retry = Number(res.headers.get("Retry-After") || 3);
+    await new Promise(r => setTimeout(r, (retry + 1) * 1000));
+    return gql(query, variables);
+  }
+  if (!res.ok) throw new Error("AniList API " + res.status);
+  const json = await res.json();
+  if (json.errors) throw new Error(json.errors[0].message);
+  return json.data;
+}
+
+const MEDIA_FIELDS = `
+  id
+  title { native romaji }
+  seasonYear season format episodes popularity averageScore siteUrl
+  genres
+  tags { name rank isGeneralSpoiler isAdult }
+  studios(isMain: true) { nodes { id name } }
+`;
+
+const Q = {
+  search: `query($q:String){Page(perPage:8){media(search:$q,type:ANIME,isAdult:false,sort:SEARCH_MATCH){
+    id title{native romaji} seasonYear format popularity }}}`,
+
+  seed: `query($id:Int){Media(id:$id,type:ANIME){ ${MEDIA_FIELDS}
+    staff(perPage:14,sort:RELEVANCE){edges{role node{id name{native full}}}}
+    relations{edges{relationType node{id type format title{native romaji} seasonYear}}}
+  }}`,
+
+  byTag: `query($tag:String){Page(perPage:50){media(tag:$tag,type:ANIME,isAdult:false,sort:POPULARITY_DESC){ ${MEDIA_FIELDS} }}}`,
+
+  byStaff: `query($id:Int){Staff(id:$id){staffMedia(type:ANIME,perPage:30,sort:POPULARITY_DESC){nodes{ ${MEDIA_FIELDS} }}}}`,
+
+  byStudio: `query($id:Int){Studio(id:$id){media(perPage:30,isMain:true,sort:POPULARITY_DESC){nodes{ ${MEDIA_FIELDS} }}}}`
+};
+
+/* ---------- 類似度 ---------- */
+// タグ（ランク重み）+ ジャンルを疎ベクトル化
+function vectorize(m){
+  const v = new Map();
+  (m.genres || []).forEach(g => v.set("g:" + g, GENRE_W));
+  (m.tags || []).forEach(t => {
+    if (t.isGeneralSpoiler || t.isAdult) return;
+    if (t.rank < TAG_MIN_RANK) return;
+    v.set("t:" + t.name, t.rank / 100);
+  });
+  return v;
+}
+function cosine(a, b){
+  let dot = 0, na = 0, nb = 0;
+  for (const [k, x] of a){ na += x * x; const y = b.get(k); if (y) dot += x * y; }
+  for (const y of b.values()) nb += y * y;
+  const d = Math.sqrt(na * nb);
+  return d ? dot / d : 0;
+}
+// 生の余弦は 0.15〜0.65 程度しか使われない。加点と釣り合うよう 0〜1 に伸ばす
+function stretch(c){ return Math.min(1, Math.max(0, (c - COS_LO) / (COS_HI - COS_LO))); }
+// 制作会社の「作風の一貫性」= 自社作品同士がタグ空間でどれだけ固まっているか
+function coherence(list){
+  const v = list.slice(0, 16).map(vectorize);
+  let sum = 0, n = 0;
+  for (let i = 0; i < v.length; i++)
+    for (let j = i + 1; j < v.length; j++){ sum += cosine(v[i], v[j]); n++; }
+  return n ? sum / n : 0;
+}
+const studioIds = m => new Set((m.studios?.nodes || []).map(s => s.id));
+function sharesStudio(a, b){
+  const A = studioIds(a); for (const id of studioIds(b)) if (A.has(id)) return true; return false;
+}
+
+// 直系（続編・前日譚など）は類似度を独占するのでグラフから隔離する
+const DIRECT = new Set(["SEQUEL","PREQUEL","SIDE_STORY","PARENT","ALTERNATIVE",
+                        "SUMMARY","SPIN_OFF","ADAPTATION","SOURCE","COMPACT","CONTAINS"]);
+const OK_FORMAT = new Set(["TV","TV_SHORT","MOVIE","OVA","ONA","SPECIAL"]);
+const REL_JA = {SEQUEL:"続編",PREQUEL:"前作",SIDE_STORY:"サイドストーリー",PARENT:"本編",
+  ALTERNATIVE:"別バージョン",SUMMARY:"総集編",SPIN_OFF:"スピンオフ",CHARACTER:"共通キャラ",OTHER:"関連"};
+const FORMAT_JA = {TV:"TVシリーズ",TV_SHORT:"ショートTV",MOVIE:"劇場",OVA:"OVA",ONA:"ONA",SPECIAL:"スペシャル"};
+const SEASON_JA = {WINTER:"冬",SPRING:"春",SUMMER:"夏",FALL:"秋"};
+
+/* ---------- グラフ構築 ---------- */
+async function buildGraph(seedId, progress){
+  progress("起点の作品を読み込み中");
+  const seed = (await gql(Q.seed, {id: seedId})).Media;
+
+  const relatedIds = new Set([seed.id]);
+  const lineage = [];
+  for (const e of (seed.relations?.edges || [])){
+    if (e.node.type !== "ANIME") continue;
+    if (DIRECT.has(e.relationType)) relatedIds.add(e.node.id);
+    if (e.node.format && OK_FORMAT.has(e.node.format)){
+      lineage.push({id:e.node.id, rel:REL_JA[e.relationType] || "関連",
+        title:e.node.title.native || e.node.title.romaji, year:e.node.seasonYear});
+    }
+  }
+
+  // 候補プール: 上位タグ / 主要スタッフ / 制作会社
+  const tags = (seed.tags || [])
+    .filter(t => !t.isGeneralSpoiler && !t.isAdult && t.rank >= 60)
+    .sort((a,b) => b.rank - a.rank).slice(0, 6);
+
+  // 同一人物が複数役職を兼ねる場合は最も重い役職を採用
+  const byPerson = new Map();
+  for (const e of (seed.staff?.edges || [])){
+    const info = roleInfo(e.role);
+    if (!info) continue;
+    const cur = byPerson.get(e.node.id);
+    if (!cur || cur.w < info.w) byPerson.set(e.node.id, {node:e.node, w:info.w, ja:info.ja});
+  }
+  const keyStaff = [...byPerson.values()].sort((a, b) => b.w - a.w).slice(0, 4);
+
+  const studio = (seed.studios?.nodes || [])[0];
+
+  const pool = new Map();          // id -> media
+  const staffScore = new Map();    // id -> 役職重みの合計
+  const why = new Map();           // id -> 起点との共通点（説明用）
+  let studioWorks = [];
+  const absorb = (list, hit) => {
+    for (const m of (list || [])){
+      if (!m || relatedIds.has(m.id)) continue;
+      if (!OK_FORMAT.has(m.format)) continue;
+      if ((m.popularity || 0) < 300) continue;   // 極端に情報の薄い作品を除く
+      if (!pool.has(m.id)) pool.set(m.id, m);
+      if (hit){
+        staffScore.set(m.id, (staffScore.get(m.id) || 0) + hit.w);
+        if (!why.has(m.id)) why.set(m.id, []);
+        why.get(m.id).push(hit.label);
+      }
+    }
+  };
+
+  const jobs = [];
+  tags.forEach(t => jobs.push({label:`「${t.name}」の作品を収集中`, run: async () =>
+    absorb((await gql(Q.byTag, {tag:t.name})).Page.media)}));
+  keyStaff.forEach(k => {
+    const name = k.node.name.native || k.node.name.full;
+    jobs.push({label:`${name} の担当作を収集中`, run: async () =>
+      absorb((await gql(Q.byStaff, {id:k.node.id})).Staff.staffMedia.nodes,
+             {w:k.w, label:`${k.ja}：${name}`})});
+  });
+  if (studio) jobs.push({label:`${studio.name} の作品を収集中`, run: async () => {
+    studioWorks = (await gql(Q.byStudio, {id:studio.id})).Studio.media.nodes || [];
+    absorb(studioWorks);
+  }});
+
+  for (let i = 0; i < jobs.length; i++){
+    progress(`${jobs[i].label}　${i + 1}/${jobs.length}`);
+    try { await jobs[i].run(); } catch(e){ /* 個別の失敗は無視して続行 */ }
+  }
+  if (pool.size === 0) throw new Error("EMPTY");
+
+  progress("類似度を計算中");
+  const seedVec = vectorize(seed);
+
+  // 制作会社の加点量は「その会社の作風がどれだけ揃っているか」で決める。
+  // 京アニのような一貫した会社は効き、受注中心の会社はほぼゼロになる。
+  const coh = coherence(studioWorks.filter(m => m && m.id !== seed.id));
+  const cohNorm = Math.min(1, Math.max(0, (coh - 0.25) / 0.35));
+  const studioBonus = STUDIO_W[0] + (STUDIO_W[1] - STUDIO_W[0]) * cohNorm;
+
+  const scored = [...pool.values()].map(m => {
+    const base  = stretch(cosine(seedVec, vectorize(m)));      // タグ・ジャンル
+    const staff = Math.min(STAFF_CAP, staffScore.get(m.id) || 0);
+    const sameStudio = sharesStudio(seed, m);
+    const reasons = [...(why.get(m.id) || [])];
+    if (sameStudio) reasons.push(`制作：${studio ? studio.name : ""}`);
+    return {media:m, sim: Math.min(1, base + staff + (sameStudio ? studioBonus : 0)),
+            base, staff, why:reasons};
+  }).sort((a,b) => b.sim - a.sim).slice(0, NODE_LIMIT);
+
+  console.info(`[縁図] ${studio ? studio.name : "制作会社なし"} の作風一貫性 ${coh.toFixed(3)} → 加点 ${studioBonus.toFixed(3)}`);
+
+  // ノード
+  const nodes = [{media:seed, sim:1, seed:true, why:[]}, ...scored].map((d, i) => ({
+    i, id:d.media.id, media:d.media, sim:d.sim, seed:!!d.seed, why:d.why || [],
+    year: d.media.seasonYear || 0,
+    pop: d.media.popularity || 0,
+    vec: vectorize(d.media),
+    label: (d.media.title.native || d.media.title.romaji || "")
+  }));
+
+  // エッジ: 全ペアの類似度を出し、各ノードの上位のみ残す（毛玉化を防ぐ）
+  const cand = [];
+  for (let a = 0; a < nodes.length; a++)
+    for (let b = a + 1; b < nodes.length; b++){
+      let w = stretch(cosine(nodes[a].vec, nodes[b].vec));
+      if (sharesStudio(nodes[a].media, nodes[b].media)) w += 0.04;
+      if (w >= EDGE_MIN) cand.push({a, b, w});
+    }
+  cand.sort((x, y) => y.w - x.w);
+  const deg = new Array(nodes.length).fill(0);
+  const links = [];
+  for (const e of cand){
+    if (deg[e.a] >= EDGE_PER_NODE || deg[e.b] >= EDGE_PER_NODE) continue;
+    deg[e.a]++; deg[e.b]++; links.push(e);
+  }
+  // 孤立ノードは起点に細く繋いでおく
+  nodes.forEach(n => { if (n.i > 0 && deg[n.i] === 0) links.push({a:0, b:n.i, w:Math.max(0.1, n.sim)}); });
+
+  return {seed, nodes, links, lineage};
+}
+
+/* ---------- 力学配置 ---------- */
+function layout(g, onTick, onEnd){
+  const N = g.nodes;
+  // 起点との類似度を目標半径に写す。値の分布をそのまま距離に反映させる
+  const sims = N.slice(1).map(n => n.sim);
+  const sMax = sims.length ? Math.max(...sims) : 1;
+  const sMin = sims.length ? Math.min(...sims) : 0;
+  const span = Math.max(1e-6, sMax - sMin);
+  g.radial = {sMax, sMin, span};
+  N.forEach((n, i) => {
+    n.tr = i === 0 ? 0 : RADIAL.R0 + RADIAL.K * (sMax - n.sim) / span;
+    const a = i * 2.39996;                                   // 黄金角で初期配置を散らす
+    const rad = i === 0 ? 0 : (mode === "radial" ? n.tr : 120 + Math.random() * 160);
+    n.x = Math.cos(a) * rad; n.y = Math.sin(a) * rad; n.vx = 0; n.vy = 0;
+  });
+
+  let step = 0;
+  const TOTAL = 320;
+  function tick(){
+    const alpha = Math.max(0.02, 1 - step / TOTAL);
+    // 斥力
+    for (let i = 0; i < N.length; i++)
+      for (let j = i + 1; j < N.length; j++){
+        const A = N[i], B = N[j];
+        let dx = B.x - A.x, dy = B.y - A.y;
+        let d2 = Math.max(64, dx*dx + dy*dy), d = Math.sqrt(d2);
+        const f = (2000 + (A.r + B.r) * 10) / d2 * alpha;
+        const ux = dx / d, uy = dy / d;
+        A.vx -= ux*f; A.vy -= uy*f; B.vx += ux*f; B.vy += uy*f;
+        // 本家同様、円は重ねる。片方が完全に飲み込まれる時だけ押し戻す
+        const min = Math.max(A.r, B.r) * 0.62;
+        if (d < min){ const push = (min - d) * 0.35;
+          A.vx -= ux*push; A.vy -= uy*push; B.vx += ux*push; B.vy += uy*push; }
+      }
+    // 引力（類似度が高いほど近く）
+    for (const e of g.links){
+      const A = N[e.a], B = N[e.b];
+      const target = (A.r + B.r) * 0.55 + 40 + (1 - e.w) * 190;
+      let dx = B.x - A.x, dy = B.y - A.y, d = Math.hypot(dx, dy) || 0.01;
+      const f = (d - target) * 0.055 * alpha, ux = dx/d, uy = dy/d;
+      A.vx += ux*f; A.vy += uy*f; B.vx -= ux*f; B.vy -= uy*f;
+    }
+    // 動径方向の力: 類似度に応じた半径へ引き寄せる（角度方向は自由なのでクラスタは残る）
+    if (mode === "radial"){
+      for (let i = 1; i < N.length; i++){
+        const n = N[i];
+        const d = Math.hypot(n.x, n.y) || 0.01;
+        const f = (d - n.tr) * RADIAL.force * alpha;
+        n.vx -= (n.x / d) * f; n.vy -= (n.y / d) * f;
+      }
+    }
+    // 中心への重力（同心円配置では動径方向の力と競合するので切る） + 減衰
+    const grav = mode === "radial" ? 0 : 0.006;
+    for (const n of N){
+      n.vx -= n.x * grav * alpha; n.vy -= n.y * grav * alpha;
+      n.vx *= 0.82; n.vy *= 0.82;
+      const sp = Math.hypot(n.vx, n.vy);
+      if (sp > 60){ n.vx = n.vx / sp * 60; n.vy = n.vy / sp * 60; }   // 発散防止
+      n.x += n.vx; n.y += n.vy;
+    }
+    N[0].x = 0; N[0].y = 0; N[0].vx = 0; N[0].vy = 0;  // 起点は中心に固定
+    onTick();
+    if (++step < TOTAL) requestAnimationFrame(tick); else onEnd();
+  }
+  requestAnimationFrame(tick);
+}
+
+/* ---------- 描画 ---------- */
+const SVGNS = "http://www.w3.org/2000/svg";
+const el = id => document.getElementById(id);
+const $svg = el("svg"), $view = el("view"), $links = el("links"),
+      $nodesG = el("nodes"), $labels = el("labels");
+
+let G = null, selected = null;
+let tx = 0, ty = 0, scale = 1;
+
+const OLD_C = [143,189,182], NEW_C = [18,58,77];
+function yearColor(y, min, max){
+  const t = max > min ? Math.min(1, Math.max(0, (y - min) / (max - min))) : 0.5;
+  const c = OLD_C.map((v, i) => Math.round(v + (NEW_C[i] - v) * t));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+function applyTransform(){ $view.setAttribute("transform", `translate(${tx},${ty}) scale(${scale})`); }
+
+const R_MIN = 9, R_MAX = 78;
+function sizeNodes(g){
+  const maxPop = Math.max(...g.nodes.map(n => n.pop), 1);
+  for (const n of g.nodes){
+    n.r = R_MIN + (R_MAX - R_MIN) * Math.sqrt(Math.min(1, n.pop / maxPop));
+    if (!isFinite(n.x)) { n.x = 0; n.y = 0; n.vx = 0; n.vy = 0; }
+  }
+}
+const $rings = el("rings");
+function renderRings(g){
+  $rings.textContent = "";
+  if (mode !== "radial" || !g.radial) return;
+  const {sMax, span} = g.radial;
+  for (const t of [0.25, 0.5, 0.75, 1]){
+    const r = RADIAL.R0 + RADIAL.K * t;
+    const c = document.createElementNS(SVGNS, "circle");
+    c.setAttribute("r", r.toFixed(1)); $rings.appendChild(c);
+    const tx = document.createElementNS(SVGNS, "text");
+    tx.setAttribute("x", 0); tx.setAttribute("y", (-r - 7).toFixed(1));
+    tx.textContent = ((sMax - t * span) * 100).toFixed(0) + "%";
+    $rings.appendChild(tx);
+  }
+}
+function render(g){
+  sizeNodes(g);
+  $links.textContent = ""; $nodesG.textContent = ""; $labels.textContent = "";
+  const years = g.nodes.map(n => n.year).filter(Boolean);
+  const minY = years.length ? Math.min(...years) : 2000;
+  const maxY = years.length ? Math.max(...years) : 2000;
+  el("yr-min").textContent = minY; el("yr-max").textContent = maxY;
+  el("legend").hidden = false; el("tools").hidden = false;
+
+  for (const e of g.links){
+    const l = document.createElementNS(SVGNS, "line");
+    l.setAttribute("stroke-width", (0.5 + e.w * 2.2).toFixed(2));
+    l.setAttribute("stroke-opacity", (0.14 + e.w * 0.4).toFixed(2));
+    e.__el = l; $links.appendChild(l);
+  }
+  for (const n of g.nodes){
+    const grp = document.createElementNS(SVGNS, "g");
+    grp.setAttribute("tabindex", "0");
+    grp.setAttribute("role", "button");
+    grp.setAttribute("aria-label", n.label);
+    if (n.seed) grp.classList.add("seed");
+
+    const c = document.createElementNS(SVGNS, "circle");
+    c.setAttribute("class", "body");
+    c.setAttribute("r", n.r);
+    const fill = yearColor(n.year || minY, minY, maxY);
+    c.setAttribute("fill", fill);
+    c.setAttribute("fill-opacity", "0.55");
+    c.setAttribute("stroke", "rgba(255,255,255,.55)");
+    c.setAttribute("stroke-width", "1");
+    grp.appendChild(c);
+
+    if (n.seed) c.setAttribute("fill", "#c8452f");
+    if (n.seed) c.setAttribute("fill-opacity", "0.7");
+    if (n.seed){   // 起点の落款（朱の環）
+      const seal = document.createElementNS(SVGNS, "circle");
+      seal.setAttribute("class", "seal"); seal.setAttribute("r", n.r + 5);
+      grp.appendChild(seal);
+    }
+    const halo = document.createElementNS(SVGNS, "circle");
+    halo.setAttribute("class", "halo"); halo.setAttribute("r", n.r + 7);
+    grp.appendChild(halo);
+
+    const t = document.createElementNS(SVGNS, "text");
+    t.setAttribute("text-anchor", "middle");
+    t.setAttribute("dy", "0.36em");
+    t.setAttribute("font-size", Math.max(10, Math.min(14, 9 + n.r * 0.09)));
+    t.textContent = n.label.length > 12 ? n.label.slice(0, 11) + "…" : n.label;
+    // 半透明の円を紙に重ねた後の明るさで文字色を決める
+    const rgb = (n.seed ? "rgb(200,69,47)" : fill).match(/\d+/g).map(Number);
+    const op  = n.seed ? 0.7 : 0.55;
+    const lum = 0.299*rgb[0] + 0.587*rgb[1] + 0.114*rgb[2];
+    const eff = op * lum + (1 - op) * 238;            // 紙の明るさ 238 と合成
+    const dark = eff < 150;
+    t.style.fill   = dark ? "#f7f9f8" : "#12211f";
+    t.style.stroke = dark ? "rgba(12,26,32,.55)" : "rgba(243,246,244,.9)";
+    n.__t = t; $labels.appendChild(t);
+
+    grp.setAttribute("data-i", n.i);
+    grp.classList.add("node");
+    grp.addEventListener("keydown", ev => {
+      if (ev.key === "Enter" || ev.key === " "){ ev.preventDefault(); select(n); } });
+    n.__el = grp; $nodesG.appendChild(grp);
+  }
+  positions();
+}
+function positions(){
+  if (!G) return;
+  for (const e of G.links){
+    const A = G.nodes[e.a], B = G.nodes[e.b];
+    e.__el.setAttribute("x1", A.x); e.__el.setAttribute("y1", A.y);
+    e.__el.setAttribute("x2", B.x); e.__el.setAttribute("y2", B.y);
+  }
+  for (const n of G.nodes){
+    n.__el.setAttribute("transform", `translate(${n.x},${n.y})`);
+    n.__t.setAttribute("x", n.x.toFixed(1)); n.__t.setAttribute("y", n.y.toFixed(1));
+  }
+}
+function relayout(){
+  if (!G) return;
+  layout(G, positions, () => { renderRings(G); requestAnimationFrame(fit); });
+}
+function fit(){
+  if (!G) return;
+  const b = $svg.getBoundingClientRect();
+  const pad = 60;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const n of G.nodes){
+    x0 = Math.min(x0, n.x - n.r); y0 = Math.min(y0, n.y - n.r);
+    x1 = Math.max(x1, n.x + n.r); y1 = Math.max(y1, n.y + n.r);
+  }
+  const w = x1 - x0, h = y1 - y0;
+  scale = Math.min((b.width - pad*2) / w, (b.height - pad*2) / h, 1.6);
+  tx = b.width/2 - (x0 + w/2) * scale;
+  ty = b.height/2 - (y0 + h/2) * scale;
+  applyTransform();
+}
+
+/* ---------- 詳細パネル ---------- */
+const $panel = el("panel"), $body = el("p-body");
+function select(n){
+  if (selected) selected.__el.classList.remove("sel");
+  selected = n; n.__el.classList.add("sel");
+  const m = n.media;
+  const rel = n.seed ? null : G.lineage.find(x => x.id === m.id);
+  const tags = (m.tags || []).filter(t => !t.isGeneralSpoiler && !t.isAdult && t.rank >= 55)
+    .sort((a,b) => b.rank - a.rank).slice(0, 12);
+  const studios = (m.studios?.nodes || []).map(s => s.name).join("・") || "—";
+  const staffRows = n.seed
+    ? (G.seed.staff?.edges || []).filter(e => roleInfo(e.role)).slice(0, 6)
+    : [];
+
+  $body.innerHTML = `
+    <div class="col">
+    <div class="p-kicker">
+      ${n.seed ? '<span class="p-seal">起点</span>' : ''}
+      <span class="p-rel">${rel ? rel.rel : (FORMAT_JA[m.format] || m.format || "")}</span>
+    </div>
+    <h2>${esc(m.title.native || m.title.romaji)}</h2>
+    <div class="p-romaji">${esc(m.title.romaji || "")}</div>
+
+    <dl class="p-meta">
+      <dt>放送</dt><dd>${m.seasonYear || "—"}${m.season ? " " + SEASON_JA[m.season] : ""}</dd>
+      <dt>形式</dt><dd class="jp">${FORMAT_JA[m.format] || m.format || "—"}${m.episodes ? ` 全${m.episodes}話` : ""}</dd>
+      <dt>制作</dt><dd class="jp">${esc(studios)}</dd>
+      <dt>登録者</dt><dd>${(m.popularity || 0).toLocaleString()}</dd>
+      <dt>平均点</dt><dd>${m.averageScore ? m.averageScore + " / 100" : "—"}</dd>
+    </dl>
+
+    ${n.seed ? "" : `
+    <div class="p-sim">
+      <div class="row"><span>起点との類似度</span><b>${(n.sim * 100).toFixed(0)}%</b></div>
+      <div class="p-bar"><i style="width:${Math.round(n.sim * 100)}%"></i></div>
+      ${n.why && n.why.length ? `<div class="chips" style="margin-top:10px">${
+        n.why.map(r => `<span>${esc(r)}</span>`).join("")}</div>` : ""}
+    </div>`}
+
+    <div class="p-actions">
+      ${n.seed ? "" : `<button class="primary" data-goto="${m.id}">この作品を中心にする</button>`}
+      <a href="${m.siteUrl || "https://anilist.co/anime/" + m.id}" target="_blank" rel="noopener">AniList で見る</a>
+    </div>
+    </div>
+
+    <div class="col">
+    ${staffRows.length ? `<div class="p-h">主要スタッフ</div>
+      <dl class="p-meta" style="border-bottom:none">${staffRows.map(e =>
+        `<dt>${esc(shortRole(e.role))}</dt><dd class="jp">${esc(e.node.name.native || e.node.name.full)}</dd>`).join("")}</dl>` : ""}
+
+    <div class="p-h">タグ（数字は AniList のランク）</div>
+    <div class="chips">${tags.map(t => `<span>${esc(t.name)}<i>${t.rank}</i></span>`).join("") || "<span>—</span>"}</div>
+    </div>
+
+    <div class="col">
+    ${G.lineage.length ? `<div class="p-h">直系の作品（類似度からは除外）</div>
+      <div class="linklist">${G.lineage.map(x =>
+        `<button data-goto="${x.id}"><span class="lt">${esc(x.title)}</span><span class="ly">${x.rel} ${x.year || ""}</span></button>`).join("")}</div>`
+      : `<div class="p-h">近い作品</div><div class="linklist">${
+          G.nodes.filter(o => !o.seed && o.id !== m.id).slice(0, 6).map(o =>
+          `<button data-goto="${o.id}"><span class="lt">${esc(o.label)}</span><span class="ly">${(o.sim*100).toFixed(0)}%</span></button>`).join("")}</div>`}
+    </div>`;
+
+  $body.querySelectorAll("[data-goto]").forEach(b =>
+    b.addEventListener("click", () => load(Number(b.dataset.goto))));
+  $panel.hidden = false;
+  $panel.scrollTop = 0;
+}
+function shortRole(r){
+  const info = roleInfo(r);
+  return info ? info.ja : String(r).replace(/\s*\(.*?\)\s*/g, "").trim();
+}
+function esc(s){ return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+el("p-close").addEventListener("click", () => { $panel.hidden = true; });
+
+/* ---------- 読み込みフロー ---------- */
+const $state = el("state"), $load = el("load"), $err = el("err");
+function progress(msg){ $load.hidden = false; el("load-msg").textContent = msg; }
+
+async function load(id){
+  el("suggest").hidden = true;
+  $state.hidden = true; $panel.hidden = true; $err.textContent = "";
+  $links.textContent = ""; $nodesG.textContent = ""; $labels.textContent = ""; $rings.textContent = "";
+  selected = null;
+  try{
+    G = await buildGraph(id, progress);
+    progress("配置を計算中");
+    render(G);
+    layout(G, positions, () => { $load.hidden = true; renderRings(G); select(G.nodes[0]); requestAnimationFrame(fit); });
+    history.replaceState(null, "", "#" + id);
+  }catch(e){
+    $load.hidden = true;
+    $state.hidden = false;
+    el("legend").hidden = true; el("tools").hidden = true;
+    $err.textContent = e.message === "EMPTY"
+      ? "この作品には比較できるメタデータが足りませんでした。別の作品で試してください。"
+      : "AniList に接続できませんでした（" + e.message + "）。通信環境を確認して再読み込みしてください。";
+  }
+}
+
+/* ---------- 検索 ---------- */
+const $q = el("q"), $sg = el("suggest");
+let timer = null, cursor = -1, results = [];
+$q.addEventListener("input", () => {
+  clearTimeout(timer);
+  const v = $q.value.trim();
+  if (v.length < 1){ $sg.hidden = true; return; }
+  timer = setTimeout(async () => {
+    try{
+      results = (await gql(Q.search, {q:v})).Page.media;
+      cursor = -1;
+      $sg.innerHTML = results.map((m, i) => `
+        <button data-i="${i}" role="option">
+          <div class="sg-t">${esc(m.title.native || m.title.romaji)}</div>
+          <div class="sg-m">${m.seasonYear || "----"} · ${FORMAT_JA[m.format] || m.format || ""} · ${(m.popularity||0).toLocaleString()}人</div>
+        </button>`).join("") || `<button disabled style="color:#9aa3a0">該当なし</button>`;
+      $sg.hidden = false;
+      $sg.querySelectorAll("button[data-i]").forEach(b =>
+        b.addEventListener("click", () => { $q.value = ""; $sg.hidden = true; load(results[b.dataset.i].id); }));
+    }catch(e){ $sg.hidden = true; }
+  }, 280);
+});
+$q.addEventListener("keydown", e => {
+  const items = [...$sg.querySelectorAll("button[data-i]")];
+  if (!items.length) return;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp"){
+    e.preventDefault();
+    items.forEach(b => b.removeAttribute("data-on"));
+    cursor = (cursor + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+    items[cursor].setAttribute("data-on", "1");
+    items[cursor].scrollIntoView({block:"nearest"});
+  } else if (e.key === "Enter"){
+    e.preventDefault();
+    const pick = cursor >= 0 ? results[cursor] : results[0];
+    if (pick){ $q.value = ""; $sg.hidden = true; load(pick.id); }
+  } else if (e.key === "Escape") $sg.hidden = true;
+});
+document.addEventListener("click", e => { if (!e.target.closest(".searchwrap")) $sg.hidden = true; });
+
+/* ---------- パン・ズーム / タップ（PC・タッチ両対応） ---------- */
+const pointers = new Map();
+let pinchStart = null, downNode = null, travel = 0;
+
+function hitNode(target){
+  const g = target && target.closest ? target.closest("g.node") : null;
+  return g ? G.nodes[Number(g.getAttribute("data-i"))] : null;
+}
+$svg.addEventListener("pointerdown", e => {
+  pointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
+  if (pointers.size === 1){ travel = 0; downNode = hitNode(e.target); }
+  else downNode = null;
+  if (pointers.size === 2){
+    const [a, b] = [...pointers.values()];
+    pinchStart = {d: Math.hypot(a.x-b.x, a.y-b.y), scale, cx:(a.x+b.x)/2, cy:(a.y+b.y)/2, tx, ty};
+  }
+  $svg.classList.add("dragging");
+});
+window.addEventListener("pointermove", e => {
+  const p = pointers.get(e.pointerId); if (!p) return;
+  const dx = e.clientX - p.x, dy = e.clientY - p.y;
+  travel += Math.abs(dx) + Math.abs(dy);
+  pointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
+  if (pointers.size === 1){ tx += dx; ty += dy; applyTransform(); return; }
+  if (pointers.size === 2 && pinchStart){
+    const [a, b] = [...pointers.values()];
+    const d = Math.hypot(a.x-b.x, a.y-b.y);
+    const k = Math.min(4, Math.max(0.25, pinchStart.scale * (d / pinchStart.d)));
+    const r = $svg.getBoundingClientRect();
+    const cx = pinchStart.cx - r.left, cy = pinchStart.cy - r.top;
+    tx = cx - (cx - pinchStart.tx) * (k / pinchStart.scale);
+    ty = cy - (cy - pinchStart.ty) * (k / pinchStart.scale);
+    scale = k; applyTransform();
+  }
+});
+function endPointer(e){
+  const wasSingle = pointers.size === 1;
+  pointers.delete(e.pointerId);
+  if (pointers.size < 2) pinchStart = null;
+  if (!pointers.size) $svg.classList.remove("dragging");
+  if (wasSingle && downNode && travel < 14) select(downNode);   // 動かしていなければタップ扱い
+  downNode = null;
+}
+window.addEventListener("pointerup", endPointer);
+window.addEventListener("pointercancel", endPointer);
+$svg.addEventListener("wheel", e => {
+  e.preventDefault();
+  const r = $svg.getBoundingClientRect(), cx = e.clientX - r.left, cy = e.clientY - r.top;
+  const k = Math.min(4, Math.max(0.25, scale * (e.deltaY < 0 ? 1.12 : 1/1.12)));
+  tx = cx - (cx - tx) * (k / scale); ty = cy - (cy - ty) * (k / scale);
+  scale = k; applyTransform();
+}, {passive:false});
+
+el("mode").addEventListener("click", () => {
+  mode = mode === "radial" ? "cluster" : "radial";
+  el("mode").style.color = mode === "radial" ? "" : "#9aa5a1";
+  el("mode").title = mode === "radial" ? "同心円配置（中心からの距離＝類似度）" : "クラスタ配置（本家寄り）";
+  relayout();
+});
+el("fit").addEventListener("click", fit);
+el("help").addEventListener("click", () => alert(
+  "縁図の見方\n\n" +
+  "・中心の朱い環が起点の作品です\n" +
+  "・円の大きさ＝AniList の登録者数\n" +
+  "・色の濃さ＝放送年（淡いほど古い）\n" +
+  "・中心からの距離＝起点との類似度（点線の輪が目安、数字は%）\n" +
+  "・角度方向には似た作品どうしが自然に集まります\n" +
+  "・線の太さ＝2作品どうしのタグの近さ\n" +
+  "・円をタップすると詳細、そこから中心を移せます\n\n" +
+  "続編や前日譚は類似度を独占してしまうため地図からは外し、起点の詳細に「直系の作品」として別に並べています。"));
+el("home").addEventListener("click", () => location.hash = "");
+window.addEventListener("resize", () => { if (G) fit(); });
+
+/* ---------- 入口 ---------- */
+const STARTERS = ["化物語","STEINS;GATE","君の名は。","四月は君の嘘",
+                  "PSYCHO-PASS","けいおん!","進撃の巨人","ヴァイオレット・エヴァーガーデン"];
+el("seeds").innerHTML = STARTERS.map(t => `<button data-t="${t}">${t}</button>`).join("");
+el("seeds").querySelectorAll("button").forEach(b =>
+  b.addEventListener("click", () => loadByTitle(b.dataset.t)));
+
+async function loadByTitle(title){
+  progress("作品を検索中");
+  try{
+    const hit = (await gql(Q.search, {q:title})).Page.media[0];
+    if (hit) return load(hit.id);
+    throw new Error("見つかりませんでした");
+  }catch(e){
+    $load.hidden = true;
+    $err.textContent = "AniList に接続できませんでした（" + e.message + "）。通信環境を確認して再読み込みしてください。";
+  }
+}
+
+const boot = Number(location.hash.replace("#", ""));
+if (boot) load(boot);
+</script>
+</body>
+</html>
