@@ -39,13 +39,14 @@ header{
   border-bottom:1px solid var(--rule);background:var(--paper-2);
   position:relative;z-index:40;
 }
-.brand{display:flex;align-items:baseline;gap:8px;flex:0 0 auto;cursor:pointer}
-.brand .mark{
-  font-family:var(--mincho);font-size:23px;letter-spacing:.04em;
-  color:var(--shu);line-height:1;
+.brand{display:flex;align-items:baseline;gap:5px;flex:0 0 auto;cursor:pointer}
+.brand .mark,.brand .mark2{
+  font-family:Georgia,"Times New Roman",serif;font-size:19px;
+  letter-spacing:.005em;line-height:1;white-space:nowrap;
 }
-.brand .sub{font-size:11px;color:var(--sumi-soft);letter-spacing:.14em}
-@media(max-width:600px){.brand .sub{display:none}}
+.brand .mark{color:var(--sumi)}
+.brand .mark2{color:var(--shu)}
+@media(max-width:420px){.brand .mark,.brand .mark2{font-size:16px}}
 
 .searchwrap{position:relative;flex:1 1 auto;max-width:520px}
 #q{
@@ -219,7 +220,7 @@ main{flex:1 1 auto;position:relative;min-height:0;display:block}
 <div id="app">
   <header>
     <div class="brand" id="home" role="button" tabindex="0">
-      <span class="mark">縁図</span><span class="sub">ENISHI-ZU</span>
+      <span class="mark">Connected</span><span class="mark2">Animes</span>
     </div>
     <div class="searchwrap">
       <svg class="mag" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
@@ -286,7 +287,7 @@ main{flex:1 1 auto;position:relative;min-height:0;display:block}
 "use strict";
 
 /* ============================================================
-   縁図 / Enishi-zu
+   Connected Animes
    1作品を起点に、AniList のタグ・スタッフ・制作会社メタデータから
    類似作品グラフを構築して力学配置で描画する。
    共起（視聴履歴）は使わない = 海外ユーザーの嗜好バイアスが入らない。
@@ -386,6 +387,10 @@ const Q = {
 
   byStudio: `query($id:Int){Studio(id:$id){media(perPage:30,isMain:true,sort:POPULARITY_DESC){nodes{ ${MEDIA_FIELDS} }}}}`
 };
+// 複数作品の関連をまとめて取得する（90 req/min を節約するため）
+const relBatch = ids => `query{${ids.map((id, i) => `m${i}: Media(id:${id}){
+  id title{native romaji} seasonYear format
+  relations{edges{relationType node{id type format title{native romaji} seasonYear}}}}`).join("\n")}}`;
 
 /* ---------- 類似度 ---------- */
 // タグ（ランク重み）+ ジャンルを疎ベクトル化
@@ -421,30 +426,74 @@ function sharesStudio(a, b){
   const A = studioIds(a); for (const id of studioIds(b)) if (A.has(id)) return true; return false;
 }
 
-// 直系（続編・前日譚など）は類似度を独占するのでグラフから隔離する
-const DIRECT = new Set(["SEQUEL","PREQUEL","SIDE_STORY","PARENT","ALTERNATIVE",
-                        "SUMMARY","SPIN_OFF","ADAPTATION","SOURCE","COMPACT","CONTAINS"]);
+// 同一シリーズの続き・別形態だけを地図から外す。
+// スピンオフや共通キャラは「別作品」なので残す（推薦として価値があるため）。
+const FRANCHISE = new Set(["SEQUEL","PREQUEL","SIDE_STORY","PARENT",
+                           "SUMMARY","COMPACT","ALTERNATIVE","CONTAINS"]);
+const FRANCHISE_MAX = 70;  // 1シリーズから辿る上限
+const FRANCHISE_HOPS = 3;  // 何ホップ先まで同一シリーズとみなすか
 const OK_FORMAT = new Set(["TV","TV_SHORT","MOVIE","OVA","ONA","SPECIAL"]);
 const REL_JA = {SEQUEL:"続編",PREQUEL:"前作",SIDE_STORY:"サイドストーリー",PARENT:"本編",
-  ALTERNATIVE:"別バージョン",SUMMARY:"総集編",SPIN_OFF:"スピンオフ",CHARACTER:"共通キャラ",OTHER:"関連"};
+  ALTERNATIVE:"別バージョン",SUMMARY:"総集編",COMPACT:"再編集版",CONTAINS:"収録作",
+  SPIN_OFF:"スピンオフ",CHARACTER:"共通キャラ",OTHER:"関連"};
 const FORMAT_JA = {TV:"TVシリーズ",TV_SHORT:"ショートTV",MOVIE:"劇場",OVA:"OVA",ONA:"ONA",SPECIAL:"スペシャル"};
 const SEASON_JA = {WINTER:"冬",SPRING:"春",SUMMER:"夏",FALL:"秋"};
+
+/* ---------- 同一シリーズの推移的な探索 ----------
+   AniList の relations は直接の繋がりしか返さないため、
+   化物語 → 偽物語 → 猫物語… のように離れた作品は1ホップでは拾えない。
+   FRANCHISE の関係だけを辿って、シリーズ全体を集める。            */
+async function franchiseOf(seed, progress){
+  const members = new Map();          // id -> {rel, title, year, format}
+  const others  = [];                 // スピンオフ・共通キャラなど（地図には残す）
+  const seen = new Set([seed.id]);
+
+  const pull = (m, inherited, sink) => {
+    for (const e of (m.relations?.edges || [])){
+      const nd = e.node;
+      if (!nd || nd.type !== "ANIME") continue;
+      const ja = REL_JA[e.relationType] || "関連";
+      if (!FRANCHISE.has(e.relationType)){
+        if (m.id === seed.id && nd.format && OK_FORMAT.has(nd.format))
+          others.push({id:nd.id, rel:ja, title:nd.title.native || nd.title.romaji, year:nd.seasonYear});
+        continue;
+      }
+      if (seen.has(nd.id)) continue;
+      seen.add(nd.id);
+      members.set(nd.id, {id:nd.id, rel: inherited || ja,
+        title: nd.title.native || nd.title.romaji, year: nd.seasonYear, format: nd.format});
+      sink.push(nd.id);
+    }
+  };
+
+  let level = [seed];
+  for (let hop = 0; hop < FRANCHISE_HOPS && seen.size < FRANCHISE_MAX; hop++){
+    const next = [];
+    for (const m of level) pull(m, hop === 0 ? null : (members.get(m.id) || {}).rel, next);
+    if (!next.length) break;
+    progress(`シリーズ作品を照合中　${seen.size - 1}件`);
+    level = [];
+    for (let i = 0; i < next.length && seen.size < FRANCHISE_MAX; i += 10){
+      try{
+        const data = await gql(relBatch(next.slice(i, i + 10)), {});
+        for (const k of Object.keys(data)) if (data[k]) level.push(data[k]);
+      }catch(e){ /* 一部が取れなくても続行 */ }
+    }
+  }
+  return {members, others};
+}
 
 /* ---------- グラフ構築 ---------- */
 async function buildGraph(seedId, progress){
   progress("起点の作品を読み込み中");
   const seed = (await gql(Q.seed, {id: seedId})).Media;
 
-  const relatedIds = new Set([seed.id]);
-  const lineage = [];
-  for (const e of (seed.relations?.edges || [])){
-    if (e.node.type !== "ANIME") continue;
-    if (DIRECT.has(e.relationType)) relatedIds.add(e.node.id);
-    if (e.node.format && OK_FORMAT.has(e.node.format)){
-      lineage.push({id:e.node.id, rel:REL_JA[e.relationType] || "関連",
-        title:e.node.title.native || e.node.title.romaji, year:e.node.seasonYear});
-    }
-  }
+  const {members, others} = await franchiseOf(seed, progress);
+  const relatedIds = new Set([seed.id, ...members.keys()]);
+  const lineage = [...members.values()].filter(x => x.format && OK_FORMAT.has(x.format))
+    .sort((a, b) => (a.year || 0) - (b.year || 0));
+  const kin = others;
+  console.info(`[Connected Animes] 同一シリーズ ${members.size}件を地図から除外／別作品として残した関連 ${others.length}件`);
 
   // 候補プール: 上位タグ / 主要スタッフ / 制作会社
   const tags = (seed.tags || [])
@@ -520,7 +569,7 @@ async function buildGraph(seedId, progress){
             base, staff, why:reasons};
   }).sort((a,b) => b.sim - a.sim).slice(0, NODE_LIMIT);
 
-  console.info(`[縁図] ${studio ? studio.name : "制作会社なし"} の作風一貫性 ${coh.toFixed(3)} → 加点 ${studioBonus.toFixed(3)}`);
+  console.info(`[Connected Animes] ${studio ? studio.name : "制作会社なし"} の作風一貫性 ${coh.toFixed(3)} → 加点 ${studioBonus.toFixed(3)}`);
 
   // ノード
   const nodes = [{media:seed, sim:1, seed:true, why:[]}, ...scored].map((d, i) => ({
@@ -549,7 +598,7 @@ async function buildGraph(seedId, progress){
   // 孤立ノードは起点に細く繋いでおく
   nodes.forEach(n => { if (n.i > 0 && deg[n.i] === 0) links.push({a:0, b:n.i, w:Math.max(0.1, n.sim)}); });
 
-  return {seed, nodes, links, lineage};
+  return {seed, nodes, links, lineage, kin};
 }
 
 /* ---------- 力学配置 ---------- */
@@ -814,9 +863,12 @@ function select(n){
     </div>
 
     <div class="col">
-    ${G.lineage.length ? `<div class="p-h">直系の作品（類似度からは除外）</div>
+    ${G.lineage.length ? `<div class="p-h">同一シリーズ（地図からは除外）</div>
       <div class="linklist">${G.lineage.map(x =>
-        `<button data-goto="${x.id}"><span class="lt">${esc(x.title)}</span><span class="ly">${x.rel} ${x.year || ""}</span></button>`).join("")}</div>`
+        `<button data-goto="${x.id}"><span class="lt">${esc(x.title)}</span><span class="ly">${x.rel} ${x.year || ""}</span></button>`).join("")}</div>
+      ${G.kin && G.kin.length ? `<div class="p-h">関連するが別作品（地図に残す）</div>
+        <div class="linklist">${G.kin.map(x =>
+          `<button data-goto="${x.id}"><span class="lt">${esc(x.title)}</span><span class="ly">${x.rel} ${x.year || ""}</span></button>`).join("")}</div>` : ""}`
       : `<div class="p-h">近い作品</div><div class="linklist">${
           G.nodes.filter(o => !o.seed && o.id !== m.id).slice(0, 6).map(o =>
           `<button data-goto="${o.id}"><span class="lt">${esc(o.label)}</span><span class="ly">${(o.sim*100).toFixed(0)}%</span></button>`).join("")}</div>`}
@@ -972,7 +1024,7 @@ el("mode").addEventListener("click", () => {
 });
 el("fit").addEventListener("click", fit);
 el("help").addEventListener("click", () => alert(
-  "Connected Animesの見方\n\n" +
+  "Connected Animes の見方\n\n" +
   "・中心の朱い環が起点の作品です\n" +
   "・円の大きさ＝AniList の登録者数\n" +
   "・色の濃さ＝放送年（淡いほど古い）\n" +
@@ -981,7 +1033,8 @@ el("help").addEventListener("click", () => alert(
   "・線の太さ＝2作品どうしのタグの近さ\n" +
   "・円をタップすると詳細、そこから中心を移せます\n\n" +
   "右上のボタン：左＝表示スタイル（円を重ねる／重ねない）、中＝配置（同心円／クラスタ）\n\n" +
-  "続編や前日譚は類似度を独占してしまうため地図からは外し、起点の詳細に「直系の作品」として別に並べています。"));
+  "続編・前日譚・総集編・別バージョンは同一シリーズとして地図から外し、詳細に一覧で並べています。\n" +
+  "スピンオフや共通キャラの作品は別作品なので地図に残します。"));
 el("home").addEventListener("click", () => location.hash = "");
 window.addEventListener("resize", () => { if (G) fit(); });
 
