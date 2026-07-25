@@ -601,6 +601,51 @@ async function buildGraph(seedId, progress){
   return {seed, nodes, links, lineage, kin};
 }
 
+/* ---------- コミュニティ検出（ラベル伝播法） ----------
+   エッジで強く結ばれたノード群に同じラベルを付ける。
+   グラフの「群れ」を明示的に取り出し、クラスタ配置で離すために使う。      */
+function detectCommunities(g){
+  const N = g.nodes, adj = N.map(() => []);
+  for (const e of g.links){ adj[e.a].push([e.b, e.w]); adj[e.b].push([e.a, e.w]); }
+  const label = N.map((_, i) => i);
+  for (let pass = 0; pass < 12; pass++){
+    let moved = false;
+    const order = [...N.keys()].sort(() => Math.random() - 0.5);
+    for (const i of order){
+      if (i === 0) continue;                       // 起点は自分のラベルを保つ
+      const w = new Map();
+      for (const [j, wij] of adj[i]) w.set(label[j], (w.get(label[j]) || 0) + wij);
+      if (!w.size) continue;
+      let best = label[i], bestW = -1;
+      for (const [lab, ww] of w) if (ww > bestW){ bestW = ww; best = lab; }
+      if (best !== label[i]){ label[i] = best; moved = true; }
+    }
+    if (!moved) break;
+  }
+  // 小さすぎる群れ（3件未満）は、最も強く繋がる隣の群れへ併合してノイズを減らす
+  const MIN_SIZE = 3;
+  for (let pass = 0; pass < 4; pass++){
+    const count = new Map();
+    label.forEach(l => count.set(l, (count.get(l) || 0) + 1));
+    let changed = false;
+    for (let i = 1; i < N.length; i++){
+      if (count.get(label[i]) >= MIN_SIZE) continue;
+      const w = new Map();
+      for (const [j, wij] of adj[i])
+        if (label[j] !== label[i]) w.set(label[j], (w.get(label[j]) || 0) + wij);
+      let best = null, bestW = 0;
+      for (const [lab, ww] of w) if (ww > bestW){ bestW = ww; best = lab; }
+      if (best !== null){ label[i] = best; changed = true; }
+    }
+    if (!changed) break;
+  }
+  // ラベルを 0,1,2… の連番に振り直す（起点のコミュニティを 0 に）
+  const remap = new Map([[label[0], 0]]);
+  N.forEach(n => { const l = label[n.i];
+    if (!remap.has(l)) remap.set(l, remap.size); n.comm = remap.get(l); });
+  return remap.size;                               // コミュニティ数
+}
+
 /* ---------- 力学配置 ---------- */
 function layout(g, onTick, onEnd){
   const N = g.nodes;
@@ -610,12 +655,31 @@ function layout(g, onTick, onEnd){
   const sMin = sims.length ? Math.min(...sims) : 0;
   const span = Math.max(1e-6, sMax - sMin);
   g.radial = {sMax, sMin, span};
+
+  // クラスタ配置用: コミュニティを検出し、各群れの目標中心を大きな円周上に置く
+  const nComm = detectCommunities(g);
+  const clusterR = S().K * 1.05 + 120;                       // 群れ中心を並べる円の半径
+  const commCenter = i => {                                  // コミュニティ i の目標中心
+    if (i === 0) return {x: 0, y: 0};                        // 起点の群れは中央
+    const a = (i - 1) / Math.max(1, nComm - 1) * Math.PI * 2;
+    return {x: Math.cos(a) * clusterR, y: Math.sin(a) * clusterR};
+  };
+  g.commCount = nComm;
+
   N.forEach((n, i) => {
     n.tr = i === 0 ? 0 : S().R0 + S().K * (sMax - n.sim) / span;
-    const a = i * 2.39996;                                   // 黄金角で初期配置を散らす
-    const rad = i === 0 ? 0 : (mode === "radial" ? n.tr : 120 + Math.random() * 160);
-    n.x = Math.cos(a) * rad; n.y = Math.sin(a) * rad; n.vx = 0; n.vy = 0;
+    if (mode === "radial"){
+      const a = i * 2.39996;                                 // 黄金角で初期配置を散らす
+      n.x = Math.cos(a) * n.tr; n.y = Math.sin(a) * n.tr;
+    } else {
+      const c = commCenter(n.comm);                          // 群れ中心の近くから始める
+      n.x = c.x + (Math.random() - 0.5) * 90;
+      n.y = c.y + (Math.random() - 0.5) * 90;
+    }
+    if (i === 0){ n.x = 0; n.y = 0; }
+    n.vx = 0; n.vy = 0;
   });
+  g._commCenter = commCenter;
 
   let step = 0;
   const TOTAL = 320;
@@ -627,7 +691,8 @@ function layout(g, onTick, onEnd){
         const A = N[i], B = N[j];
         let dx = B.x - A.x, dy = B.y - A.y;
         let d2 = Math.max(64, dx*dx + dy*dy), d = Math.sqrt(d2);
-        const f = (2000 + (A.r + B.r) * 10) / d2 * alpha;
+        const rep = mode === "radial" ? 2000 : 3400;
+        const f = (rep + (A.r + B.r) * 10) / d2 * alpha;
         const ux = dx / d, uy = dy / d;
         A.vx -= ux*f; A.vy -= uy*f; B.vx += ux*f; B.vy += uy*f;
         const min = S().collide(A, B);
@@ -651,8 +716,16 @@ function layout(g, onTick, onEnd){
         n.vx -= (n.x / d) * f; n.vy -= (n.y / d) * f;
       }
     }
-    // 中心への重力（同心円配置では動径方向の力と競合するので切る） + 減衰
-    const grav = mode === "radial" ? 0 : 0.006;
+    // クラスタ配置: 各ノードを自分の群れの中心へ引く（群れごとに分離させる）
+    if (mode !== "radial"){
+      for (let i = 1; i < N.length; i++){
+        const n = N[i], c = g._commCenter(n.comm);
+        n.vx += (c.x - n.x) * 0.045 * alpha;
+        n.vy += (c.y - n.y) * 0.045 * alpha;
+      }
+    }
+    // 中心への弱い重力（同心円配置では動径方向の力と競合するので切る） + 減衰
+    const grav = mode === "radial" ? 0 : 0.002;
     for (const n of N){
       n.vx -= n.x * grav * alpha; n.vy -= n.y * grav * alpha;
       n.vx *= 0.82; n.vy *= 0.82;
