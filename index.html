@@ -112,6 +112,18 @@ main{flex:1 1 auto;position:relative;min-height:0;display:block}
   display:grid;place-items:center;box-shadow:0 4px 14px -6px rgba(20,30,28,.35);
 }
 .tools button:active{transform:scale(.94)}
+#tagctl{position:relative;font-family:var(--mono);font-size:14px;font-weight:600;color:var(--sumi)}
+#tagctl #tagnum{line-height:1}
+#tagpop{
+  position:absolute;background:#fff;border:1px solid var(--rule);border-radius:12px;
+  box-shadow:0 12px 32px -12px rgba(20,30,28,.35);padding:12px 14px;z-index:30;
+  width:210px;font-family:var(--gothic);
+}
+#tagpop[hidden]{display:none}
+#tagpop .lab{font-size:12px;color:var(--sumi-soft);margin-bottom:8px;display:flex;justify-content:space-between}
+#tagpop .lab b{font-family:var(--mono);color:var(--sumi);font-size:13px}
+#tagpop input[type=range]{width:100%;accent-color:var(--shu);margin:0}
+#tagpop .hint{font-size:11px;color:var(--sumi-soft);margin-top:8px;line-height:1.5}
 
 /* ---------- 状態表示 ---------- */
 #state{
@@ -257,6 +269,9 @@ main{flex:1 1 auto;position:relative;min-height:0;display:block}
         <button id="fit" title="全体を表示" aria-label="全体を表示">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
         </button>
+        <button id="tagctl" title="候補に使うタグ数" aria-label="候補に使うタグ数">
+          <span id="tagnum">3</span>
+        </button>
         <button id="help" title="見方" aria-label="見方">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9.2 9a2.8 2.8 0 115.3 1.3c-.6 1-2.5 1.4-2.5 3"/><circle cx="12" cy="17.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="9.5"/></svg>
         </button>
@@ -298,6 +313,7 @@ const NODE_LIMIT   = 38;   // 起点を除く表示ノード数
 const EDGE_PER_NODE = 4;   // 1ノードあたり残す最大エッジ数
 const EDGE_MIN     = 0.22; // エッジを引く最小類似度（引き伸ばし後の尺度）
 const TAG_MIN_RANK = 40;   // これ未満のランクのタグは無視
+let TAG_QUERY_COUNT = 3;   // 候補集めに使う上位タグの本数（UIで1〜10に変更可）
 const GENRE_W      = 0.5;  // ジャンルの重み（タグは rank/100 = 0.4〜1.0）
 const COS_LO       = 0.12; // 余弦の実効下限。これを 0% に写す
 const COS_HI       = 0.67; // 余弦の実効上限。これを 100% に写す
@@ -498,7 +514,7 @@ async function buildGraph(seedId, progress){
   // 候補プール: 上位タグ / 主要スタッフ / 制作会社
   const tags = (seed.tags || [])
     .filter(t => !t.isGeneralSpoiler && !t.isAdult && t.rank >= 60)
-    .sort((a,b) => b.rank - a.rank).slice(0, 3);
+    .sort((a,b) => b.rank - a.rank).slice(0, TAG_QUERY_COUNT);
 
   // 同一人物が複数役職を兼ねる場合は最も重い役職を採用
   const byPerson = new Map();
@@ -1096,6 +1112,32 @@ el("mode").addEventListener("click", () => {
   relayout();
 });
 el("fit").addEventListener("click", fit);
+// 候補に使うタグ本数のスライダー
+(function initTagControl(){
+  const btn = el("tagctl");
+  const pop = document.createElement("div");
+  pop.id = "tagpop"; pop.hidden = true;
+  pop.innerHTML =
+    '<div class="lab"><span>候補に使うタグ数</span><b id="tagval">' + TAG_QUERY_COUNT + '</b></div>' +
+    '<input type="range" id="tagrange" min="1" max="10" step="1" value="' + TAG_QUERY_COUNT + '">' +
+    '<div class="hint">上位から何本のタグで候補を集めるか。多いほど網羅的になり、少ないほど起点の主要な色に絞られます。</div>';
+  btn.appendChild(pop);
+  const range = pop.querySelector("#tagrange"), val = pop.querySelector("#tagval");
+  btn.addEventListener("click", e => {
+    if (e.target.closest("#tagpop")) return;      // ポップアップ内の操作では閉じない
+    pop.hidden = !pop.hidden;
+  });
+  range.addEventListener("input", () => {
+    TAG_QUERY_COUNT = Number(range.value);
+    val.textContent = TAG_QUERY_COUNT;
+    el("tagnum").textContent = TAG_QUERY_COUNT;
+  });
+  range.addEventListener("change", () => { if (G) load(G.seed.id); });   // 確定で再構築
+  document.addEventListener("click", e => {
+    if (!e.target.closest("#tagctl")) pop.hidden = true;
+  });
+})();
+
 el("help").addEventListener("click", () => alert(
   "Connected Animes の見方\n\n" +
   "・中心の朱い環が起点の作品です\n" +
@@ -1105,7 +1147,7 @@ el("help").addEventListener("click", () => alert(
   "・角度方向には似た作品どうしが自然に集まります\n" +
   "・線の太さ＝2作品どうしのタグの近さ\n" +
   "・円をタップすると詳細、そこから中心を移せます\n\n" +
-  "右上のボタン：左＝表示スタイル（円を重ねる／重ねない）、中＝配置（同心円／クラスタ）\n\n" +
+  "右上のボタン：左＝表示スタイル（円を重ねる／重ねない）、中＝配置（同心円／クラスタ）、数字＝候補に使うタグ数（1〜10）\n\n" +
   "続編・前日譚・総集編・別バージョンは同一シリーズとして地図から外し、詳細に一覧で並べています。\n" +
   "スピンオフや共通キャラの作品は別作品なので地図に残します。"));
 el("home").addEventListener("click", () => location.hash = "");
