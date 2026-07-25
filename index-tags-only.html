@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>Connected Animes — アニメのつながりを描く</title>
+<title>Connected Animes（タグのみ版）— アニメのつながりを描く</title>
 <meta name="description" content="1本のアニメを起点に、タグ・スタッフ・制作会社の重なりから近い作品の地図を描きます。">
 <style>
 :root{
@@ -220,7 +220,7 @@ main{flex:1 1 auto;position:relative;min-height:0;display:block}
 <div id="app">
   <header>
     <div class="brand" id="home" role="button" tabindex="0">
-      <span class="mark">Connected</span><span class="mark2">Animes</span>
+      <span class="mark">Connected</span><span class="mark2">Animes</span><span class="sub" style="font-size:10px;color:var(--sumi-soft);margin-left:6px;letter-spacing:.1em">tags only</span>
     </div>
     <div class="searchwrap">
       <svg class="mag" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
@@ -500,49 +500,20 @@ async function buildGraph(seedId, progress){
     .filter(t => !t.isGeneralSpoiler && !t.isAdult && t.rank >= 60)
     .sort((a,b) => b.rank - a.rank).slice(0, 3);
 
-  // 同一人物が複数役職を兼ねる場合は最も重い役職を採用
-  const byPerson = new Map();
-  for (const e of (seed.staff?.edges || [])){
-    const info = roleInfo(e.role);
-    if (!info) continue;
-    const cur = byPerson.get(e.node.id);
-    if (!cur || cur.w < info.w) byPerson.set(e.node.id, {node:e.node, w:info.w, ja:info.ja});
-  }
-  const keyStaff = [...byPerson.values()].sort((a, b) => b.w - a.w).slice(0, 4);
-
-  const studio = (seed.studios?.nodes || [])[0];
-
   const pool = new Map();          // id -> media
-  const staffScore = new Map();    // id -> 役職重みの合計
-  const why = new Map();           // id -> 起点との共通点（説明用）
-  let studioWorks = [];
-  const absorb = (list, hit) => {
+  const absorb = (list) => {
     for (const m of (list || [])){
       if (!m || relatedIds.has(m.id)) continue;
       if (!OK_FORMAT.has(m.format)) continue;
       if ((m.popularity || 0) < 300) continue;   // 極端に情報の薄い作品を除く
       if (!pool.has(m.id)) pool.set(m.id, m);
-      if (hit){
-        staffScore.set(m.id, (staffScore.get(m.id) || 0) + hit.w);
-        if (!why.has(m.id)) why.set(m.id, []);
-        why.get(m.id).push(hit.label);
-      }
     }
   };
 
+  // 【タグのみ版】候補源は上位タグのみ。スタッフ・制作会社は使わない
   const jobs = [];
   tags.forEach(t => jobs.push({label:`「${t.name}」の作品を収集中`, run: async () =>
     absorb((await gql(Q.byTag, {tag:t.name})).Page.media)}));
-  keyStaff.forEach(k => {
-    const name = k.node.name.native || k.node.name.full;
-    jobs.push({label:`${name} の担当作を収集中`, run: async () =>
-      absorb((await gql(Q.byStaff, {id:k.node.id})).Staff.staffMedia.nodes,
-             {w:k.w, label:`${k.ja}：${name}`})});
-  });
-  if (studio) jobs.push({label:`${studio.name} の作品を収集中`, run: async () => {
-    studioWorks = (await gql(Q.byStudio, {id:studio.id})).Studio.media.nodes || [];
-    absorb(studioWorks);
-  }});
 
   for (let i = 0; i < jobs.length; i++){
     progress(`${jobs[i].label}　${i + 1}/${jobs.length}`);
@@ -553,23 +524,11 @@ async function buildGraph(seedId, progress){
   progress("類似度を計算中");
   const seedVec = vectorize(seed);
 
-  // 制作会社の加点量は「その会社の作風がどれだけ揃っているか」で決める。
-  // 京アニのような一貫した会社は効き、受注中心の会社はほぼゼロになる。
-  const coh = coherence(studioWorks.filter(m => m && m.id !== seed.id));
-  const cohNorm = Math.min(1, Math.max(0, (coh - 0.25) / 0.35));
-  const studioBonus = STUDIO_W[0] + (STUDIO_W[1] - STUDIO_W[0]) * cohNorm;
-
+  // 【タグのみ版】タグ・ジャンルの余弦類似度だけでスコアリング
   const scored = [...pool.values()].map(m => {
-    const base  = stretch(cosine(seedVec, vectorize(m)));      // タグ・ジャンル
-    const staff = Math.min(STAFF_CAP, staffScore.get(m.id) || 0);
-    const sameStudio = sharesStudio(seed, m);
-    const reasons = [...(why.get(m.id) || [])];
-    if (sameStudio) reasons.push(`制作：${studio ? studio.name : ""}`);
-    return {media:m, sim: Math.min(1, base + staff + (sameStudio ? studioBonus : 0)),
-            base, staff, why:reasons};
+    const base = stretch(cosine(seedVec, vectorize(m)));
+    return {media:m, sim: base, base, staff:0, why:[]};
   }).sort((a,b) => b.sim - a.sim).slice(0, NODE_LIMIT);
-
-  console.info(`[Connected Animes] ${studio ? studio.name : "制作会社なし"} の作風一貫性 ${coh.toFixed(3)} → 加点 ${studioBonus.toFixed(3)}`);
 
   // ノード
   const nodes = [{media:seed, sim:1, seed:true, why:[]}, ...scored].map((d, i) => ({
@@ -585,7 +544,6 @@ async function buildGraph(seedId, progress){
   for (let a = 0; a < nodes.length; a++)
     for (let b = a + 1; b < nodes.length; b++){
       let w = stretch(cosine(nodes[a].vec, nodes[b].vec));
-      if (sharesStudio(nodes[a].media, nodes[b].media)) w += 0.04;
       if (w >= EDGE_MIN) cand.push({a, b, w});
     }
   cand.sort((x, y) => y.w - x.w);
@@ -819,8 +777,7 @@ function select(n){
     .sort((a,b) => b.rank - a.rank).slice(0, 12);
   const studios = (m.studios?.nodes || []).map(s => s.name).join("・") || "—";
   const staffRows = n.seed
-    ? (G.seed.staff?.edges || []).filter(e => roleInfo(e.role)).slice(0, 6)
-    : [];
+    ? [] : [];   // 【タグのみ版】スタッフ欄は表示しない
 
   $body.innerHTML = `
     <div class="col">
