@@ -208,6 +208,12 @@ main{flex:1 1 auto;position:relative;min-height:0;display:block}
   background:#fff;color:#39423f;
 }
 .chips span i{font-style:normal;font-family:var(--mono);font-size:10px;color:var(--sumi-soft);margin-left:5px}
+.chips span.tog{cursor:pointer;user-select:none;transition:background .12s,border-color .12s,color .12s}
+.chips span.tog.on{background:#e7f4ec;border-color:#3f9e6a;color:#1f6b43}
+.chips span.tog.on i{color:#4a9a70}
+.chips span.tog.off{background:#f0f2f0;border-color:var(--rule);color:#9aa3a0;text-decoration:line-through}
+.chips span.tog.off i{color:#b7bebb}
+.chips .taghint{width:100%;font-size:11px;color:var(--sumi-soft);margin-bottom:2px;letter-spacing:.02em}
 .linklist button{
   display:flex;justify-content:space-between;align-items:baseline;gap:10px;width:100%;
   text-align:left;padding:8px 0;border-bottom:1px solid var(--rule);
@@ -314,7 +320,9 @@ const NODE_LIMIT   = 38;   // 起点を除く表示ノード数
 const EDGE_PER_NODE = 4;   // 1ノードあたり残す最大エッジ数
 const EDGE_MIN     = 0.22; // エッジを引く最小類似度（引き伸ばし後の尺度）
 const TAG_MIN_RANK = 40;   // これ未満のランクのタグは無視
-let TAG_QUERY_COUNT = 3;   // 候補集めに使う上位タグの本数（UIで1〜10に変更可）
+const disabledTags = new Set();   // 起点の詳細でオフにされたタグ名（類似度から除外）
+let TAG_QUERY_COUNT = 3;   // 候補に採用する上位タグ数（UIで1〜10。キャッシュを絞るだけで再取得しない）
+const MAX_POOL_TAGS = 10;  // 初回に候補を集めておくタグ数の上限（多いほど初回は遅いが後が速い）
 const GENRE_W      = 0.5;  // ジャンルの重み（タグは rank/100 = 0.4〜1.0）
 const COS_LO       = 0.12; // 余弦の実効下限。これを 0% に写す
 const COS_HI       = 0.67; // 余弦の実効上限。これを 100% に写す
@@ -417,6 +425,7 @@ function vectorize(m){
   (m.tags || []).forEach(t => {
     if (t.isGeneralSpoiler || t.isAdult) return;
     if (t.rank < TAG_MIN_RANK) return;
+    if (disabledTags.has(t.name)) return;         // オフにされたタグは無視
     v.set("t:" + t.name, t.rank / 100);
   });
   return v;
@@ -500,6 +509,38 @@ async function franchiseOf(seed, progress){
   return {members, others};
 }
 
+/* ---------- スコアリング〜グラフ構築（タグのオン/オフで再実行できる） ---------- */
+function assemble(ctx){
+  const {seed, poolArr, lineage, kin, poolTagOrder} = ctx;
+  const usable = poolArr.filter(m => (poolTagOrder.get(m.id) ?? Infinity) < TAG_QUERY_COUNT);
+  const seedVec = vectorize(seed);
+  const scored = usable.map(m => ({media:m, sim: stretch(cosine(seedVec, vectorize(m))), base:0, staff:0, why:[]}))
+    .sort((a,b) => b.sim - a.sim).slice(0, NODE_LIMIT);
+
+  const nodes = [{media:seed, sim:1, seed:true, why:[]}, ...scored].map((d, i) => ({
+    i, id:d.media.id, media:d.media, sim:d.sim, seed:!!d.seed, why:d.why || [],
+    year: d.media.seasonYear || 0, pop: d.media.popularity || 0,
+    vec: vectorize(d.media), label: (d.media.title.native || d.media.title.romaji || "")
+  }));
+
+  const cand = [];
+  for (let a = 0; a < nodes.length; a++)
+    for (let b = a + 1; b < nodes.length; b++){
+      let w = stretch(cosine(nodes[a].vec, nodes[b].vec));
+      if (w >= EDGE_MIN) cand.push({a, b, w});
+    }
+  cand.sort((x, y) => y.w - x.w);
+  const deg = new Array(nodes.length).fill(0);
+  const links = [];
+  for (const e of cand){
+    if (deg[e.a] >= EDGE_PER_NODE || deg[e.b] >= EDGE_PER_NODE) continue;
+    deg[e.a]++; deg[e.b]++; links.push(e);
+  }
+  nodes.forEach(n => { if (n.i > 0 && deg[n.i] === 0) links.push({a:0, b:n.i, w:Math.max(0.1, n.sim)}); });
+
+  return {seed, nodes, links, lineage, kin, ctx};
+}
+
 /* ---------- グラフ構築 ---------- */
 async function buildGraph(seedId, progress){
   progress("起点の作品を読み込み中");
@@ -515,22 +556,24 @@ async function buildGraph(seedId, progress){
   // 候補プール: 上位タグ / 主要スタッフ / 制作会社
   const tags = (seed.tags || [])
     .filter(t => !t.isGeneralSpoiler && !t.isAdult && t.rank >= 60)
-    .sort((a,b) => b.rank - a.rank).slice(0, TAG_QUERY_COUNT);
+    .sort((a,b) => b.rank - a.rank).slice(0, MAX_POOL_TAGS);
 
   const pool = new Map();          // id -> media
-  const absorb = (list) => {
+  const poolTagOrder = new Map();  // id -> 何番目のタグで見つかったか（最小）
+  const absorb = (list, order) => {
     for (const m of (list || [])){
       if (!m || relatedIds.has(m.id)) continue;
       if (!OK_FORMAT.has(m.format)) continue;
       if ((m.popularity || 0) < 300) continue;   // 極端に情報の薄い作品を除く
       if (!pool.has(m.id)) pool.set(m.id, m);
+      poolTagOrder.set(m.id, Math.min(poolTagOrder.has(m.id) ? poolTagOrder.get(m.id) : Infinity, order));
     }
   };
 
   // 【タグのみ版】候補源は上位タグのみ。スタッフ・制作会社は使わない
   const jobs = [];
-  tags.forEach(t => jobs.push({label:`「${t.name}」の作品を収集中`, run: async () =>
-    absorb((await gql(Q.byTag, {tag:t.name})).Page.media)}));
+  tags.forEach((t, i) => jobs.push({label:`「${t.name}」の作品を収集中`, run: async () =>
+    absorb((await gql(Q.byTag, {tag:t.name})).Page.media, i)}));
 
   for (let i = 0; i < jobs.length; i++){
     progress(`${jobs[i].label}　${i + 1}/${jobs.length}`);
@@ -539,41 +582,8 @@ async function buildGraph(seedId, progress){
   if (pool.size === 0) throw new Error("EMPTY");
 
   progress("類似度を計算中");
-  const seedVec = vectorize(seed);
-
-  // 【タグのみ版】タグ・ジャンルの余弦類似度だけでスコアリング
-  const scored = [...pool.values()].map(m => {
-    const base = stretch(cosine(seedVec, vectorize(m)));
-    return {media:m, sim: base, base, staff:0, why:[]};
-  }).sort((a,b) => b.sim - a.sim).slice(0, NODE_LIMIT);
-
-  // ノード
-  const nodes = [{media:seed, sim:1, seed:true, why:[]}, ...scored].map((d, i) => ({
-    i, id:d.media.id, media:d.media, sim:d.sim, seed:!!d.seed, why:d.why || [],
-    year: d.media.seasonYear || 0,
-    pop: d.media.popularity || 0,
-    vec: vectorize(d.media),
-    label: (d.media.title.native || d.media.title.romaji || "")
-  }));
-
-  // エッジ: 全ペアの類似度を出し、各ノードの上位のみ残す（毛玉化を防ぐ）
-  const cand = [];
-  for (let a = 0; a < nodes.length; a++)
-    for (let b = a + 1; b < nodes.length; b++){
-      let w = stretch(cosine(nodes[a].vec, nodes[b].vec));
-      if (w >= EDGE_MIN) cand.push({a, b, w});
-    }
-  cand.sort((x, y) => y.w - x.w);
-  const deg = new Array(nodes.length).fill(0);
-  const links = [];
-  for (const e of cand){
-    if (deg[e.a] >= EDGE_PER_NODE || deg[e.b] >= EDGE_PER_NODE) continue;
-    deg[e.a]++; deg[e.b]++; links.push(e);
-  }
-  // 孤立ノードは起点に細く繋いでおく
-  nodes.forEach(n => { if (n.i > 0 && deg[n.i] === 0) links.push({a:0, b:n.i, w:Math.max(0.1, n.sim)}); });
-
-  return {seed, nodes, links, lineage, kin};
+  const ctx = {seed, poolArr:[...pool.values()], lineage, kin, poolTagOrder};
+  return assemble(ctx);
 }
 
 /* ---------- コミュニティ検出（ラベル伝播法） ----------
@@ -906,7 +916,10 @@ function select(n){
         `<dt>${esc(shortRole(e.role))}</dt><dd class="jp">${esc(e.node.name.native || e.node.name.full)}</dd>`).join("")}</dl>` : ""}
 
     <div class="p-h">タグ（数字は AniList のランク）</div>
-    <div class="chips">${tags.map(t => `<span>${esc(t.name)}<i>${t.rank}</i></span>`).join("") || "<span>—</span>"}</div>
+    <div class="chips">${n.seed
+      ? `<div class="taghint">タグをタップで類似度計算のオン/オフを切り替え（緑＝有効）</div>` + (tags.map(t =>
+          `<span class="tog ${disabledTags.has(t.name) ? "off" : "on"}" data-tag="${esc(t.name)}">${esc(t.name)}<i>${t.rank}</i></span>`).join("") || "<span>—</span>")
+      : (tags.map(t => `<span>${esc(t.name)}<i>${t.rank}</i></span>`).join("") || "<span>—</span>")}</div>
     </div>
 
     <div class="col">
@@ -923,6 +936,13 @@ function select(n){
 
   $body.querySelectorAll("[data-goto]").forEach(b =>
     b.addEventListener("click", () => load(Number(b.dataset.goto))));
+  $body.querySelectorAll(".chips span.tog").forEach(chip =>
+    chip.addEventListener("click", () => {
+      const name = chip.dataset.tag;
+      if (disabledTags.has(name)) disabledTags.delete(name); else disabledTags.add(name);
+      chip.classList.toggle("on"); chip.classList.toggle("off");
+      rebuildFromTags();
+    }));
   $panel.hidden = false;
   $panel.scrollTop = 0;
 }
@@ -938,6 +958,7 @@ const $state = el("state"), $load = el("load"), $err = el("err");
 function progress(msg){ $load.hidden = false; el("load-msg").textContent = msg; }
 
 async function load(id){
+  disabledTags.clear();                  // 起点が変わればタグの無効化はリセット
   el("suggest").hidden = true;
   $state.hidden = true; $panel.hidden = true; $err.textContent = "";
   $links.textContent = ""; $nodesG.textContent = ""; $labels.textContent = ""; $rings.textContent = "";
@@ -956,6 +977,24 @@ async function load(id){
       ? "この作品には比較できるメタデータが足りませんでした。別の作品で試してください。"
       : "AniList に接続できませんでした（" + e.message + "）。通信環境を確認して再読み込みしてください。";
   }
+}
+
+// 起点タグのオン/オフに応じて、再取得せずローカルで作り直す
+let rebuildTimer = null;
+function rebuildFromTags(){
+  if (!G || !G.ctx) return;
+  clearTimeout(rebuildTimer);
+  rebuildTimer = setTimeout(() => {
+    const keepId = selected ? selected.id : G.seed.id;
+    G = assemble(G.ctx);                 // 同じ候補プールから再スコアリング
+    render(G);
+    layout(G, positions, () => {
+      renderRings(G);
+      const keep = G.nodes.find(n => n.id === keepId) || G.nodes[0];
+      select(keep);
+      requestAnimationFrame(fit);
+    });
+  }, 180);
 }
 
 /* ---------- 検索 ---------- */
@@ -1078,7 +1117,7 @@ el("fit").addEventListener("click", fit);
   pop.innerHTML =
     '<div class="lab"><span>候補に使うタグ数</span><b id="tagval">' + TAG_QUERY_COUNT + '</b></div>' +
     '<input type="range" id="tagrange" min="1" max="10" step="1" value="' + TAG_QUERY_COUNT + '">' +
-    '<div class="hint">上位から何本のタグで候補を集めるか。多いほど網羅的になり、少ないほど起点の主要な色に絞られます。</div>';
+    '<div class="hint">上位から何本のタグで候補を絞るか。最大10本を最初に取得済みなので、切り替えは即時です。</div>';
   btn.appendChild(pop);
   const range = pop.querySelector("#tagrange"), val = pop.querySelector("#tagval");
   btn.addEventListener("click", e => {
@@ -1089,8 +1128,9 @@ el("fit").addEventListener("click", fit);
     TAG_QUERY_COUNT = Number(range.value);
     val.textContent = TAG_QUERY_COUNT;
     el("tagnum").textContent = TAG_QUERY_COUNT;
+    if (G) rebuildFromTags();
   });
-  range.addEventListener("change", () => { if (G) load(G.seed.id); });   // 確定で再構築
+  range.addEventListener("change", () => { if (G) rebuildFromTags(); });   // キャッシュから即再構築
   document.addEventListener("click", e => {
     if (!e.target.closest("#tagctl")) pop.hidden = true;
   });
