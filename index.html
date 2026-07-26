@@ -323,6 +323,7 @@ const TAG_MIN_RANK = 40;   // これ未満のランクのタグは無視
 const disabledTags = new Set();   // 起点の詳細でオフにされたタグ名（類似度から除外）
 let TAG_QUERY_COUNT = 3;   // 候補に採用する上位タグ数（UIで1〜10。キャッシュを絞るだけで再取得しない）
 const MAX_POOL_TAGS = 10;  // 初回に候補を集めておくタグ数の上限（多いほど初回は遅いが後が速い）
+const RELATION_FETCH_CAP = 80; // 周辺ノードの続編検出のため関連を取る候補数の上限
 const GENRE_W      = 0.5;  // ジャンルの重み（タグは rank/100 = 0.4〜1.0）
 const COS_LO       = 0.12; // 余弦の実効下限。これを 0% に写す
 const COS_HI       = 0.67; // 余弦の実効上限。これを 100% に写す
@@ -509,6 +510,40 @@ async function franchiseOf(seed, progress){
   return {members, others};
 }
 
+/* ---------- 候補どうしの同一シリーズを検出（周辺ノードの続編を1本にまとめる） ----------
+   起点だけでなく候補プール内でも、続編・前作などで結ばれた作品群を union-find でまとめ、
+   各グループの代表（最も起点に似た1本）だけを残せるようにする。               */
+function makeDSU(ids){
+  const parent = new Map(ids.map(i => [i, i]));
+  const find = x => { while (parent.get(x) !== x){ parent.set(x, parent.get(parent.get(x))); x = parent.get(x); } return x; };
+  const union = (a, b) => { a = find(a); b = find(b); if (a !== b) parent.set(a, b); };
+  return {find, union};
+}
+async function collapseFranchises(pool, seed, progress){
+  const ids = [...pool.keys()];
+  // 起点に似ている順に、関連を取る候補を上限まで選ぶ（表示されやすいものを優先）
+  const seedVec = vectorize(seed);
+  const targets = [...pool.values()]
+    .map(m => ({id:m.id, s:cosine(seedVec, vectorize(m))}))
+    .sort((a, b) => b.s - a.s).slice(0, RELATION_FETCH_CAP).map(o => o.id);
+  const dsu = makeDSU(ids);
+  for (let i = 0; i < targets.length; i += 10){
+    progress(`関連作を照合中　${Math.min(i + 10, targets.length)}/${targets.length}`);
+    try{
+      const data = await gql(relBatch(targets.slice(i, i + 10)), {});
+      for (const k of Object.keys(data)){
+        const m = data[k]; if (!m) continue;
+        for (const e of (m.relations?.edges || [])){
+          if (!FRANCHISE.has(e.relationType)) continue;
+          if (pool.has(e.node.id)) dsu.union(m.id, e.node.id);
+        }
+      }
+    }catch(e){ /* 一部失敗は無視 */ }
+  }
+  const root = new Map(); ids.forEach(id => root.set(id, dsu.find(id)));
+  return root;
+}
+
 /* ---------- スコアリング〜グラフ構築（タグのオン/オフで再実行できる） ---------- */
 function assemble(ctx){
   const {seed, poolArr, staffScore, why, studio, studioBonus, lineage, kin, poolTagOrder, nonTagSource} = ctx;
@@ -516,7 +551,7 @@ function assemble(ctx){
   const usable = poolArr.filter(m =>
     ((poolTagOrder.get(m.id) ?? Infinity) < TAG_QUERY_COUNT) || (nonTagSource && nonTagSource.has(m.id)));
   const seedVec = vectorize(seed);
-  const scored = usable.map(m => {
+  const ranked = usable.map(m => {
     const base  = stretch(cosine(seedVec, vectorize(m)));      // タグ・ジャンル
     const staff = Math.min(STAFF_CAP, staffScore.get(m.id) || 0);
     const sameStudio = sharesStudio(seed, m);
@@ -524,7 +559,16 @@ function assemble(ctx){
     if (sameStudio) reasons.push(`制作：${studio ? studio.name : ""}`);
     return {media:m, sim: Math.min(1, base + staff + (sameStudio ? studioBonus : 0)),
             base, staff, why:reasons};
-  }).sort((a,b) => b.sim - a.sim).slice(0, NODE_LIMIT);
+  }).sort((a,b) => b.sim - a.sim);
+  // 同一シリーズは代表（最上位の1本）だけ残す。起点だけでなく周辺ノードにも適用
+  const froot = ctx.franchiseRoot, seenFr = new Set();
+  const scored = [];
+  for (const d of ranked){
+    if (froot){ const r = froot.get(d.media.id);
+      if (r !== undefined){ if (seenFr.has(r)) continue; seenFr.add(r); } }
+    scored.push(d);
+    if (scored.length >= NODE_LIMIT) break;
+  }
 
   const nodes = [{media:seed, sim:1, seed:true, why:[]}, ...scored].map((d, i) => ({
     i, id:d.media.id, media:d.media, sim:d.sim, seed:!!d.seed, why:d.why || [],
@@ -632,8 +676,12 @@ async function buildGraph(seedId, progress){
   const studioBonus = STUDIO_W[0] + (STUDIO_W[1] - STUDIO_W[0]) * cohNorm;
   console.info(`[Connected Animes] ${studio ? studio.name : "制作会社なし"} の作風一貫性 ${coh.toFixed(3)} → 加点 ${studioBonus.toFixed(3)}`);
 
+  // 候補どうしの同一シリーズを検出（周辺ノードの続編を1本にまとめるため）
+  const franchiseRoot = await collapseFranchises(pool, seed, progress);
+
   // 候補プールと加点情報を保持し、タグのオン/オフで再計算できるようにする
-  const ctx = {seed, poolArr:[...pool.values()], staffScore, why, studio, studioBonus, lineage, kin, poolTagOrder, nonTagSource};
+  const ctx = {seed, poolArr:[...pool.values()], staffScore, why, studio, studioBonus,
+               lineage, kin, poolTagOrder, nonTagSource, franchiseRoot};
   return assemble(ctx);
 }
 
